@@ -13,6 +13,8 @@ from tqdm import tqdm
 # Import custom modules
 from model import get_model, MODEL_CONFIG, EFFICIENT_MODEL_CONFIG
 from data import get_loaders
+from caltech_data import get_caltech_train_loader,get_caltech_val_loader
+from cifar_data import get_cifar_train_loader,get_cifar_val_loader
 
 # Training Configuration
 TRAIN_CONFIG = {
@@ -91,6 +93,13 @@ def save_checkpoint(model, optimizer, scheduler, epoch, accuracy, filename):
     torch.save(state, filename)
     print(f"Checkpoint saved to {filename}")
 
+def save_pretrain_checkpoint(model, dataset_name, output_dir='checkpoints'):
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f'{dataset_name}_checkpoint.pth')
+    torch.save(model.state_dict(), path)
+    print(f"Saved checkpoint for {dataset_name} at: {path}")
+
+
 def load_checkpoint(model, optimizer=None, scheduler=None, filename=None):
     """Load checkpoint from file"""
     if not os.path.isfile(filename):
@@ -131,33 +140,63 @@ def create_scheduler(optimizer, num_epochs, steps_per_epoch, warmup_epochs=5, mi
         min_lr=min_lr
     )
 
-def create_csv_logger(output_dir, model_name):
-    """Create a CSV logger to save training metrics"""
-    os.makedirs(output_dir, exist_ok=True)
-    csv_path = os.path.join(output_dir, f"{model_name}_training_log.csv")
-    
-    # Create CSV file and write header
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            'epoch', 'lr', 
-            'train_loss', 'train_acc1', 'train_acc5', 
-            'val_loss', 'val_acc1', 'val_acc5', 
-            'best_acc', 'time'
-        ])
-    
-    return csv_path
 
-def log_metrics(csv_path, epoch, lr, train_metrics, val_metrics, best_acc, epoch_time):
-    """Log metrics to CSV file"""
-    with open(csv_path, 'a', newline='') as f:
+def log_metrics(dataset_name, epoch, train_loss, train_acc1, train_acc5, val_loss, val_acc1, val_acc5, log_dir="logs"):
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"{dataset_name}_log.csv")
+    write_header = not os.path.exists(log_file)
+
+    with open(log_file, mode='a', newline='') as f:
         writer = csv.writer(f)
+        if write_header:
+            writer.writerow([
+                "epoch", 
+                "train_loss", "train_acc1", "train_acc5", 
+                "val_loss", "val_acc1", "val_acc5"
+            ])
         writer.writerow([
-            epoch, lr, 
-            train_metrics[0], train_metrics[1], train_metrics[2], 
-            val_metrics[0], val_metrics[1], val_metrics[2], 
-            best_acc, epoch_time
+            epoch + 1, 
+            train_loss, train_acc1, train_acc5, 
+            val_loss, val_acc1, val_acc5
         ])
+
+
+def replace_head(model, num_classes):
+    model.head = nn.Linear(model.head.in_features, num_classes)
+    return model
+
+
+def pretrain_on_dataset(model, train_loader, val_loader, num_classes, args,dataset_name):
+    model = replace_head(model, num_classes)
+    model.to(args.device)
+
+    optimizer = create_optimizer(model, args.lr, args.weight_decay)
+    scheduler = create_scheduler(
+        optimizer,
+        num_epochs=args.epochs,
+        steps_per_epoch=len(train_loader),
+        warmup_epochs=args.warmup_epochs,
+        min_lr=args.min_lr
+    )
+    criterion = LabelSmoothingCrossEntropy(smoothing=args.label_smoothing)
+
+    print(f"\n=== Pretraining on {dataset_name} ===")
+    best_acc = 0.0
+    for epoch in range(args.epochs):
+        train_loss, train_acc1, train_acc5 = train_one_epoch(
+            model, train_loader, criterion, optimizer, scheduler, epoch, args.device
+        )
+        val_loss, val_acc1, val_acc5 = validate(model, val_loader, criterion, args.device)
+
+        best_acc = max(val_acc1, best_acc)
+        print(f"[{dataset_name}] Epoch {epoch+1}: Acc@1={val_acc1:.2f}% | Best={best_acc:.2f}%")
+        log_metrics(dataset_name, epoch, train_loss, train_acc1,train_acc5, val_loss, val_acc1,val_acc5)
+    
+    save_pretrain_checkpoint(model, dataset_name)
+
+    return model
+
+
 
 #####################################
 # Training and Evaluation Functions
@@ -269,9 +308,31 @@ def main(args):
     os.makedirs(output_dir, exist_ok=True)
     
     # Create model
-    model_name = 'swin_t_efficient' if args.efficient else 'swin_t'
-    print(f"Creating {'efficient' if args.efficient else 'standard'} Swin-T model")
-    model = get_model(model_name='swin_t', efficient=args.efficient)
+    model = get_model(model_name='swin_t', efficient=args.efficient, num_classes=1000)
+
+    # === Pretraining Stage: CIFAR ===
+    if args.pretrain_cifar and not args.skip_pretrain:
+        print("creating dataloaders for cifar100...")
+        cifar_train_loader = get_cifar_train_loader(args.batch_size, num_workers=args.workers, shuffle=True)
+        cifar_val_loader = get_cifar_val_loader(args.batch_size, num_workers=args.workers, shuffle=False)
+        model = pretrain_on_dataset(model, cifar_train_loader, cifar_val_loader, num_classes=100, args=args, dataset_name='cifar100')
+
+    # === Pretraining Stage: Caltech ===
+    if args.pretrain_caltech and not args.skip_pretrain:
+        print("creating dataloaders for caltech256...")
+        caltech_train_loader = get_caltech_train_loader(args.batch_size, num_workers=args.workers, shuffle=True)
+        caltech_val_loader = get_caltech_val_loader(args.batch_size, num_workers=args.workers, shuffle=False)
+        model = pretrain_on_dataset(model, caltech_train_loader, caltech_val_loader, num_classes=257, args=args, dataset_name='caltech256')
+
+    # === Final Training Stage ===
+    print("creating dataloaders for tinyimagenet...")
+    train_loader, val_loader, mixup_fn = get_loaders(
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+        img_size=MODEL_CONFIG["img_size"],
+        use_mixup=args.mixup
+    )
+    model = replace_head(model, num_classes=200)
     model = model.to(args.device)
     
     # Print model information
@@ -281,14 +342,6 @@ def main(args):
     # Create optimizer
     optimizer = create_optimizer(model, args.lr, args.weight_decay)
     
-    # Create data loaders
-    print("Creating data loaders")
-    train_loader, val_loader, mixup_fn = get_loaders(
-        batch_size=args.batch_size,
-        num_workers=args.workers,
-        img_size=MODEL_CONFIG["img_size"],
-        use_mixup=args.mixup
-    )
     
     # Create scheduler
     scheduler = create_scheduler(
@@ -306,9 +359,6 @@ def main(args):
     else:
         # Use label smoothing cross entropy loss
         criterion = LabelSmoothingCrossEntropy(smoothing=args.label_smoothing)
-    
-    # Create CSV logger
-    csv_path = create_csv_logger(output_dir, model_name)
     
     # Optionally resume from checkpoint
     start_epoch = 0
@@ -332,7 +382,6 @@ def main(args):
     print(f"Learning rate: {args.lr}")
     print(f"Weight decay: {args.weight_decay}")
     print(f"Using mixup: {args.mixup}")
-    print(f"Training progress will be saved to: {csv_path}")
     
     # Training loop
     for epoch in range(start_epoch, args.epochs):
@@ -340,8 +389,7 @@ def main(args):
         
         # Train for one epoch
         train_loss, train_acc1, train_acc5 = train_one_epoch(
-            model, train_loader, criterion, optimizer, scheduler, epoch, args.device, mixup_fn
-        )
+            model, train_loader, criterion, optimizer, scheduler, epoch, args.device, mixup_fn)
         
         # Evaluate on validation set
         val_loss, val_acc1, val_acc5 = validate(model, val_loader, criterion, args.device)
@@ -355,15 +403,8 @@ def main(args):
         
         # Log metrics to CSV
         lr = scheduler.get_last_lr()[0]
-        log_metrics(
-            csv_path, 
-            epoch + 1, 
-            lr, 
-            (train_loss, train_acc1, train_acc5), 
-            (val_loss, val_acc1, val_acc5), 
-            best_acc, 
-            epoch_time
-        )
+        log_metrics("main", epoch, train_loss, train_acc1, val_loss, val_acc1, log_dir=args.log_dir)
+
         
         # Print epoch summary
         print(f"Epoch {epoch+1}/{args.epochs} | Time: {epoch_time:.2f}s")
@@ -384,9 +425,8 @@ def main(args):
                 model, optimizer, scheduler, epoch + 1, val_acc1,
                 os.path.join(output_dir, 'model_best.pth')
             )
-    
+
     print(f"Training complete. Best accuracy: {best_acc:.2f}%")
-    print(f"Training log saved to: {csv_path}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Swin Transformer for Tiny ImageNet')
@@ -394,6 +434,11 @@ def parse_args():
     # Model parameters
     parser.add_argument('--efficient', action='store_true', help='Use efficient model variant')
     
+    # pre-training...
+    parser.add_argument('--pretrain_cifar', action='store_true', help='Pretrain on CIFAR first')
+    parser.add_argument('--pretrain_caltech', action='store_true', help='Pretrain on Caltech after CIFAR')
+    parser.add_argument('--skip-pretrain', action='store_true', help='Skip all pretraining stages')
+
     # Training parameters
     parser.add_argument('--batch-size', type=int, default=TRAIN_CONFIG['batch_size'], help='Batch size')
     parser.add_argument('--epochs', type=int, default=TRAIN_CONFIG['epochs'], help='Number of epochs')
@@ -414,6 +459,9 @@ def parse_args():
     parser.add_argument('--save-interval', type=int, default=TRAIN_CONFIG['save_interval'], help='Save checkpoint every N epochs')
     parser.add_argument('--resume', default='', help='Resume from checkpoint')
     
+    # logs
+    parser.add_argument('--log-dir', default='logs', type=str, help='Directory to save all training logs')
+
     # Misc
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
@@ -422,4 +470,4 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
-    main(args) 
+    main(args)
