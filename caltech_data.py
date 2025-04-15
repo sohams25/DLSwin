@@ -9,9 +9,12 @@ from tqdm import tqdm
 from torchvision.datasets import ImageFolder
 from torchvision.datasets.folder import default_loader
 
-# PATH_TO_CALTECH256 = "path/to/download/caltech256"        TODO: change this while trainign...
 
-PATH_TO_CALTECH256 = "/mnt/769EC2439EC1FB9D/vsc_projs/caltech256"
+data_dir = os.path.join(os.getcwd(),"data")
+
+PATH_TO_CALTECH256 = os.path.join(data_dir,"caltech256")
+
+# PATH_TO_CALTECH256 = "/mnt/769EC2439EC1FB9D/vsc_projs/caltech256"
 
 
 

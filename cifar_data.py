@@ -3,11 +3,18 @@ import torch
 from torchvision import datasets
 from torchvision.transforms import v2
 from torch.utils.data import random_split,DataLoader
+import os
 
 
-# PATH_TO_CIFAR100 = "path/to/download/cifar100"            TODO: change this while training
+data_dir = os.path.join(os.getcwd(),"data")
 
-PATH_TO_CIFAR100 = "/mnt/769EC2439EC1FB9D/vsc_projs/cifar100"
+if os.path.isdir(os.path.join(data_dir,"cifar100")):
+    PATH_TO_CIFAR100 = os.path.join(data_dir,"cifar100")
+else:
+    os.makedirs(os.path.join(data_dir,"cifar100"))
+    PATH_TO_CIFAR100 = os.path.join(data_dir,"cifar100")
+
+# PATH_TO_CIFAR100 = "/mnt/769EC2439EC1FB9D/vsc_projs/cifar100"
 
 transforms = v2.Compose([
     v2.PILToTensor(),
