@@ -540,10 +540,9 @@ def main(args):
 
 
     # --- Create Model ---
-    # Start with ImageNet classes, head will be replaced as needed
     print("Initializing model...")
-    model = get_model(model_name='swin_t', efficient=args.efficient, num_classes=1000, pretrained=True) # Load ImageNet pretrained weights
-    print(f"Model: swin_t (Efficient: {args.efficient}), Pretrained: True")
+    model = get_model(model_name='swin_t', efficient=args.efficient)
+    print(f"Model: swin_t (Efficient: {args.efficient})")
 
 
     # --- Pretraining Stages ---
@@ -719,8 +718,9 @@ def main(args):
         print(f"Loading best model from {best_model_path} for final confusion matrix...")
         # Create a fresh instance or reload into the current one
         # Re-create model to ensure clean state if needed, though loading state_dict should be fine
-        final_model = get_model(model_name='swin_t', efficient=args.efficient, num_classes=200) # Head already replaced
-        final_model = replace_head(final_model, num_classes=200)
+        final_model = get_model(model_name='swin_t', efficient=args.efficient) # Head already replaced
+        # final_model = replace_head(final_model, num_classes=200)
+        
         load_checkpoint(final_model, filename=best_model_path, load_optimizer_scheduler=False)
         final_model.to(args.device)
         final_model.eval()
@@ -747,7 +747,7 @@ def parse_args():
     # --- Model ---
     parser.add_argument('--model-name', type=str, default='swin_t', help='Name of the model architecture (e.g., swin_t)')
     parser.add_argument('--efficient', action='store_true', help='Use efficient model variant (if available)')
-    parser.add_argument('--no-pretrained', action='store_true', help='Do not use ImageNet pretrained weights initially')
+    # parser.add_argument('--no-pretrained', action='store_true', help='Do not use ImageNet pretrained weights initially')
 
     # --- Pre-training ---
     parser.add_argument('--pretrain-cifar', action='store_true', help='Pretrain on CIFAR-100 first')
